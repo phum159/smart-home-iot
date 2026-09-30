@@ -1,15 +1,15 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
-#include <esp_wifi.h> // ต้อง include ไลบรารีนี้เพิ่มสำหรับการจูนคลื่นวิทยุ
+#include <esp_wifi.h> // ใช้สำหรับกำหนดช่องสัญญาณ (channel) ของวิทยุ
 
 #define RELAY_PIN 5
 
-// ── โหมด debug: ส่งถี่ขึ้นเพื่อไม่ต้องรอนาน ──
-// เสร็จการตรวจแล้วเปลี่ยนกลับเป็น 60000 ด้วย
+// ── ระยะเวลาระหว่างการส่งข้อมูลอุณหภูมิ (มิลลิวินาที) ──
+// ค่าปัจจุบันตั้งไว้สำหรับการทดสอบ ค่าสำหรับใช้งานจริงคือ 60000
 #define TELEMETRY_INTERVAL_MS  10000
 
-const char* ssid = "Smart_Home"; // ใส่แค่ชื่อ WiFi เพื่อใช้เป็นเป้าหมายในการสแกนหา Channel
+const char* ssid = "Smart_Home"; // ชื่อเครือข่าย WiFi ใช้เพื่อสแกนหาช่องสัญญาณเท่านั้น ไม่ได้เชื่อมต่อ
 
 typedef struct {
     char cmd[12];
@@ -20,34 +20,34 @@ typedef struct {
 } NodeData_t;
 NodeData_t outData;
 
-// MAC Address ของ ESP32 Gateway
+// MAC Address ของ ESP32 Gateway ปลายทาง
 uint8_t gateway_mac[] = {0xCC, 0x7B, 0x5C, 0x28, 0x39, 0xA0};
 
-// ── ที่อยู่ broadcast สำหรับการทดสอบ ──
-// เฟรม broadcast ไม่มีการ ACK ตอบกลับ ใครอยู่ในระยะก็รับได้หมด
-// ถ้า gateway รับ broadcast ได้แต่ unicast ไม่ ACK = ปัญหาอยู่ที่ชั้น ACK ไม่ใช่ระยะ
-// ถ้า broadcast ก็ไม่ถึง = คลื่นไปไม่ถึงกันจริงๆ (ระยะ/เสาอากาศ/กำลังส่ง)
+// ── ที่อยู่ broadcast สำหรับการวินิจฉัยปัญหา ──
+// เฟรม broadcast ไม่มีการตอบรับ (ACK) อุปกรณ์ทุกตัวในระยะสามารถรับได้
+// หาก gateway รับ broadcast ได้ แต่ unicast ไม่ได้รับ ACK แสดงว่าปัญหาอยู่ที่การตอบรับ ไม่ใช่ระยะสัญญาณ
+// หาก broadcast ไม่ถึงเช่นกัน แสดงว่าสัญญาณไปไม่ถึง (ระยะทาง เสาอากาศ หรือกำลังส่ง)
 uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// ── สถานะการส่งที่กำลังรอผลอยู่ ──
-// เดิมใช้ธงตัวเดียวแล้วรีเซ็ตตามเวลา ซึ่งพลาด เพราะ unicast ที่ส่งไม่ถึง
-// จะลองซ้ำเกือบวินาทีกว่า callback จะกลับมา พอถึงตอนนั้นธงถูกเปลี่ยนไปแล้ว
-// ทำให้ผลของ broadcast ถูกรายงานเป็นผลของ unicast
+// ── สถานะของการส่งที่รอผลลัพธ์ ──
+// รุ่นก่อนหน้าใช้ตัวแปรสถานะเพียงตัวเดียวและรีเซ็ตตามเวลา ซึ่งทำงานผิดพลาด
+// เนื่องจาก unicast ที่ส่งไม่สำเร็จจะถูกส่งซ้ำเกือบหนึ่งวินาทีก่อน callback ทำงาน
+// ส่งผลให้ผลของ broadcast ถูกรายงานเป็นผลของ unicast
 volatile bool cb_pending      = false;
 volatile bool cb_is_broadcast = false;
 
-// ── ตัวนับผลการส่งจริง ──
+// ── ตัวนับผลการส่ง ──
 uint32_t tx_total = 0;
 uint32_t tx_ack   = 0;
 uint32_t tx_noack = 0;
 
-// ส่งไม่ถึงติดกันกี่ครั้งแล้ว ถ้าถึงเกณฑ์จะสแกนหา channel ใหม่
+// จำนวนครั้งที่ส่งไม่สำเร็จติดต่อกัน เมื่อถึงเกณฑ์จะสแกนหาช่องสัญญาณใหม่
 volatile uint8_t consec_noack = 0;
 #define RESCAN_AFTER_NOACK  3
 
 int32_t current_channel = 1;
 
-// ประกาศล่วงหน้า เพราะ resyncChannel() เรียกใช้ก่อนถึงบรรทัดที่นิยามจริง
+// ประกาศฟังก์ชันล่วงหน้า เนื่องจาก resyncChannel() ถูกเรียกใช้ก่อนตำแหน่งที่นิยาม
 int32_t getWiFiChannel(const char *target_ssid);
 void    resyncChannel(void);
 
@@ -68,37 +68,37 @@ void OnDataRecv(const esp_now_recv_info *esp_now_info, const uint8_t *incomingDa
 }
 
 // ══════════════════════════════════════════════════════════
-//  ตัวนี้แหละที่บอก "ความจริง"
-//  เดิม C3 ดูแค่ค่าที่ esp_now_send() คืนมา ซึ่งแปลว่า
-//  "ใส่คิวสำเร็จ" เท่านั้น ถอดปลั๊ก gateway ทิ้งก็ยังขึ้น OK
-//  สถานะการส่งถึงจริงมาทางนี้ทางเดียว
+//  Callback ผลการส่ง
+//  ค่าที่ esp_now_send() คืนมามีความหมายเพียงว่า "เข้าคิวสำเร็จ"
+//  แม้ gateway ไม่ได้เปิดอยู่ก็ยังได้ผลเป็น OK
+//  สถานะการส่งถึงปลายทางจริงทราบได้จาก callback นี้เท่านั้น
 // ══════════════════════════════════════════════════════════
 void OnDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     if (cb_is_broadcast) {
-        // broadcast ไม่มี ACK อยู่แล้ว สถานะตรงนี้บอกได้แค่ว่ายิงออกไปแล้ว
-        Serial.println("   [BROADCAST] ยิงออกไปแล้ว (ไม่มี ACK ให้ดู) — ไปดูฝั่ง gateway ว่ารับได้ไหม");
+        // broadcast ไม่มีการตอบรับ สถานะนี้ระบุได้เพียงว่าส่งออกไปแล้ว
+        Serial.println("   [BROADCAST] ส่งออกไปแล้ว (ไม่มี ACK) — ตรวจสอบการรับที่ฝั่ง gateway");
         cb_pending = false;
         return;
     }
     if (status == ESP_NOW_SEND_SUCCESS) {
         tx_ack++;
         consec_noack = 0;
-        Serial.printf("   [ACK] gateway ตอบรับแล้ว  (ack=%lu / noack=%lu)\n",
+        Serial.printf("   [ACK] gateway ตอบรับแล้ว (ack=%lu / noack=%lu)\n",
                       (unsigned long)tx_ack, (unsigned long)tx_noack);
         cb_pending = false;
     } else {
         tx_noack++;
         if (consec_noack < 255) consec_noack++;
-        Serial.printf("   [NO-ACK] ยิงออกไปแล้วแต่ไม่มีใครรับ  (ack=%lu / noack=%lu)\n",
+        Serial.printf("   [NO-ACK] ส่งออกไปแล้วแต่ไม่ได้รับการตอบรับ (ack=%lu / noack=%lu)\n",
                       (unsigned long)tx_ack, (unsigned long)tx_noack);
         cb_pending = false;
     }
 }
 
 // ══════════════════════════════════════════════════════════
-//  ส่งแล้วรอผลให้จบก่อนคืนค่า
-//  จำเป็นเพราะ unicast ที่ส่งไม่ถึงจะลองซ้ำเกือบ 1 วินาที
-//  ถ้าไม่รอ แล้วยิงตัวถัดไปเลย ผลของสองการส่งจะปนกันจนอ่านผิด
+//  ส่งข้อมูลและรอผลลัพธ์ก่อนคืนค่า
+//  จำเป็นเนื่องจาก unicast ที่ส่งไม่สำเร็จจะถูกส่งซ้ำนานเกือบ 1 วินาที
+//  หากส่งครั้งถัดไปทันที ผลของการส่งทั้งสองครั้งจะปะปนกัน
 // ══════════════════════════════════════════════════════════
 static void sendAndWait(uint8_t *dest, bool is_broadcast) {
     cb_is_broadcast = is_broadcast;
@@ -106,7 +106,7 @@ static void sendAndWait(uint8_t *dest, bool is_broadcast) {
 
     esp_err_t r = esp_now_send(dest, (uint8_t *) &outData, sizeof(outData));
     if (r != ESP_OK) {
-        Serial.printf("   ใส่คิวไม่สำเร็จ: %s\n", esp_err_to_name(r));
+        Serial.printf("   เพิ่มเข้าคิวไม่สำเร็จ: %s\n", esp_err_to_name(r));
         cb_pending = false;
         return;
     }
@@ -115,23 +115,23 @@ static void sendAndWait(uint8_t *dest, bool is_broadcast) {
     while (cb_pending && (millis() - t0) < 3000) delay(5);
 
     if (cb_pending) {
-        Serial.println("   (callback ไม่กลับมาเลยภายใน 3 วิ)");
+        Serial.println("   (ไม่ได้รับ callback ภายใน 3 วินาที)");
         cb_pending = false;
     }
 }
 
 // ══════════════════════════════════════════════════════════
-//  สแกนหา channel ใหม่แล้วย้ายตาม
-//  จำเป็นเพราะเดิม C3 สแกนครั้งเดียวตอนบูตแล้วล็อกค้างตลอดไป
-//  ถ้าตอนบูตเร้าเตอร์ดับอยู่ มันจะตกไป channel 1 แล้วไม่มีทางกลับมาเจอ
-//  gateway อีกเลยจนกว่าจะถอดปลั๊กเสียบใหม่
+//  สแกนหาช่องสัญญาณใหม่และย้ายไปใช้ช่องนั้น
+//  รุ่นก่อนหน้าสแกนเพียงครั้งเดียวตอนเริ่มทำงานแล้วใช้ช่องนั้นตลอด
+//  หากเราเตอร์ปิดอยู่ขณะเริ่มทำงาน อุปกรณ์จะใช้ช่อง 1 และไม่สามารถ
+//  สื่อสารกับ gateway ได้อีกจนกว่าจะรีสตาร์ท
 // ══════════════════════════════════════════════════════════
 void resyncChannel(void) {
-    Serial.println(">> ส่งไม่ถึงติดกันหลายครั้ง กำลังสแกนหา channel ใหม่...");
+    Serial.println(">> ส่งไม่สำเร็จติดต่อกันหลายครั้ง กำลังสแกนหาช่องสัญญาณใหม่...");
 
     int32_t ch = getWiFiChannel(ssid);
     if (ch == 0) {
-        Serial.println(">> ยังไม่เจอ Smart_Home (เร้าเตอร์อาจยังไม่กลับมา) เดี๋ยวลองใหม่");
+        Serial.println(">> ไม่พบเครือข่าย Smart_Home (เราเตอร์อาจยังไม่พร้อม) จะลองใหม่ภายหลัง");
         return;
     }
 
@@ -139,7 +139,7 @@ void resyncChannel(void) {
     esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
 
-    // peer ผูกกับ channel เดิมอยู่ ต้องลบแล้วเพิ่มใหม่ให้ตรงกัน
+    // peer ผูกอยู่กับช่องสัญญาณเดิม จึงต้องลบและเพิ่มใหม่ด้วยช่องที่ถูกต้อง
     esp_now_del_peer(gateway_mac);
 
     esp_now_peer_info_t peerInfo = {};
@@ -156,9 +156,9 @@ void resyncChannel(void) {
     esp_now_add_peer(&bcast);
 
     if (ch != current_channel) {
-        Serial.printf(">> ย้ายจาก channel %d ไป %d แล้ว\n", current_channel, ch);
+        Serial.printf(">> ย้ายจากช่อง %d ไปยังช่อง %d แล้ว\n", current_channel, ch);
     } else {
-        Serial.printf(">> ยังอยู่ channel %d เหมือนเดิม ปัญหาน่าจะไม่ใช่เรื่อง channel\n", ch);
+        Serial.printf(">> ยังคงอยู่ช่อง %d สาเหตุไม่น่าเกิดจากช่องสัญญาณ\n", ch);
     }
     current_channel = ch;
     consec_noack = 0;
@@ -169,7 +169,7 @@ static void printMac(const char *label, const uint8_t *mac) {
                   label, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-// ── ฟังก์ชันสแกนหา Channel ของเร้าเตอร์โดยไม่ต้องต่อเน็ต ──
+// ── สแกนหาช่องสัญญาณของเราเตอร์ โดยไม่ต้องเชื่อมต่อเครือข่าย ──
 int32_t getWiFiChannel(const char *target_ssid) {
     if (int32_t n = WiFi.scanNetworks()) {
         for (uint8_t i = 0; i < n; i++) {
@@ -178,7 +178,7 @@ int32_t getWiFiChannel(const char *target_ssid) {
             }
         }
     }
-    return 0; // คืนค่า 0 หากไม่เจอชื่อ WiFi นี้
+    return 0; // คืนค่า 0 หากไม่พบเครือข่ายที่ระบุ
 }
 
 void setup() {
@@ -188,12 +188,12 @@ void setup() {
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
-    WiFi.setSleep(false);   // ESP-NOW ต้องการวิทยุตื่นตลอด เหมือนที่ตั้งไว้ฝั่ง gateway
+    WiFi.setSleep(false);   // ESP-NOW ต้องให้วิทยุทำงานตลอดเวลา เช่นเดียวกับฝั่ง gateway
 
     Serial.println("Scanning for Gateway's WiFi channel...");
     int32_t channel = getWiFiChannel(ssid);
 
-    // บังคับเปลี่ยนคลื่นวิทยุ (Channel) ให้ตรงกับ Gateway
+    // กำหนดช่องสัญญาณของวิทยุให้ตรงกับ gateway
     if (channel != 0) {
         Serial.printf("Found %s on Channel %d. Synced!\n", ssid, channel);
         esp_wifi_set_promiscuous(true);
@@ -201,7 +201,7 @@ void setup() {
         esp_wifi_set_promiscuous(false);
     } else {
         Serial.println("WiFi not found! Using default channel 1.");
-        channel = 1; // Fallback หากเร้าเตอร์ปิดอยู่
+        channel = 1; // ค่าสำรองในกรณีที่เราเตอร์ปิดอยู่
     }
 
     if (esp_now_init() != ESP_OK) {
@@ -210,18 +210,18 @@ void setup() {
     }
 
     esp_now_register_recv_cb(OnDataRecv);
-    esp_now_register_send_cb(OnDataSent);   // ← ของใหม่ ไม่เคยมีมาก่อน
+    esp_now_register_send_cb(OnDataSent);   // รับผลการส่งจริงจากปลายทาง
 
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, gateway_mac, 6);
-    peerInfo.channel = channel; // ใช้ Channel ที่สแกนเจอ
+    peerInfo.channel = channel; // ใช้ช่องสัญญาณที่สแกนพบ
     peerInfo.encrypt = false;
 
     esp_err_t addResult = esp_now_add_peer(&peerInfo);
     Serial.printf("esp_now_add_peer (gateway): %s\n",
                   addResult == ESP_OK ? "OK" : esp_err_to_name(addResult));
 
-    // peer สำหรับ broadcast ใช้ทดสอบอย่างเดียว
+    // peer สำหรับ broadcast ใช้เพื่อการวินิจฉัยเท่านั้น
     esp_now_peer_info_t bcast = {};
     memcpy(bcast.peer_addr, broadcast_mac, 6);
     bcast.channel = channel;
@@ -230,7 +230,7 @@ void setup() {
     Serial.printf("esp_now_add_peer (broadcast): %s\n",
                   bResult == ESP_OK ? "OK" : esp_err_to_name(bResult));
 
-    // ── สรุปข้อมูลที่ต้องใช้ตรวจสอบ ──
+    // ── สรุปข้อมูลสำหรับการตรวจสอบ ──
     Serial.println("---------------- ข้อมูลตรวจสอบ ----------------");
     Serial.printf("C3 MAC (ตัวเอง)   : %s\n", WiFi.macAddress().c_str());
     printMac("Gateway MAC (เป้าหมาย):", gateway_mac);
@@ -246,20 +246,20 @@ void loop() {
     outData.c3_temp = t;
     tx_total++;
 
-    // ── อ่าน channel จากตัววิทยุจริงๆ ไม่ใช่ค่าที่จำไว้ตอนสแกน ──
-    // ถ้า esp_wifi_set_channel() ไม่เป็นผล ตัวเลขสองอันนี้จะไม่ตรงกัน
+    // ── อ่านช่องสัญญาณจากวิทยุโดยตรง แทนค่าที่บันทึกไว้ตอนสแกน ──
+    // หาก esp_wifi_set_channel() ไม่มีผล ค่าทั้งสองจะไม่ตรงกัน
     uint8_t prim = 0;
     wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
     esp_wifi_get_channel(&prim, &sec);
 
-    Serial.printf("[%lu] กำลังส่ง c3_temp = %.2f C (%d ไบต์) | วิทยุอยู่ channel %u (จำไว้ว่า %d)\n",
+    Serial.printf("[%lu] กำลังส่ง c3_temp = %.2f C (%d ไบต์) | ช่องสัญญาณปัจจุบัน %u (ที่บันทึกไว้ %d)\n",
                   (unsigned long)tx_total, t, (int)sizeof(outData),
                   prim, (int)current_channel);
 
-    // ── รอบที่ 1: ยิงตรงไปที่ gateway (มี ACK จริง) ──
+    // ── รอบที่ 1: ส่งตรงไปยัง gateway (มีการตอบรับ) ──
     sendAndWait(gateway_mac, false);
 
-    // ── รอบที่ 2: ยิง broadcast ทดสอบว่าคลื่นไปถึงกันไหม ──
+    // ── รอบที่ 2: ส่ง broadcast เพื่อตรวจสอบว่าสัญญาณไปถึงหรือไม่ ──
     sendAndWait(broadcast_mac, true);
 
     if (consec_noack >= RESCAN_AFTER_NOACK) {
