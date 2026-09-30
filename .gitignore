@@ -1,0 +1,6 @@
+firmware/esp32_gateway/secrets.h
+*.bak
+.vscode/
+.theia/
+Debug/
+.metadata/

@@ -1,0 +1,108 @@
+# ══════════════════════════════════════════════════════════
+#  ปุ่มปรับทั้งหมดของระบบไฟห้องนอน
+#  เอาไปวางต่อท้าย configuration.yaml แล้วรีสตาร์ท HA หนึ่งครั้ง
+#  หลังจากนั้นปรับค่าได้จากหน้าเว็บ ไม่ต้องแตะไฟล์นี้อีก
+# ══════════════════════════════════════════════════════════
+
+input_boolean:
+  bedroom_auto:
+    name: ระบบไฟอัตโนมัติห้องนอน
+    icon: mdi:robot
+  bedroom_night_footlamp:
+    name: กลางดึกเปิดโคมปลายเท้าด้วย
+    icon: mdi:floor-lamp
+
+input_number:
+  bedroom_lux_on:
+    name: เปิดไฟเมื่อมืดกว่า (lux)
+    min: 0
+    max: 300
+    step: 5
+    initial: 50
+    icon: mdi:brightness-5
+    unit_of_measurement: lx
+
+  bedroom_empty_off_min:
+    name: ไม่มีคนกี่นาทีถึงปิด
+    min: 1
+    max: 60
+    step: 1
+    initial: 5
+    icon: mdi:timer-off
+    unit_of_measurement: min
+
+  bedroom_sleep_min:
+    name: นอนนิ่งกี่นาทีถึงถือว่าหลับ
+    min: 5
+    max: 120
+    step: 5
+    initial: 20
+    icon: mdi:sleep
+    unit_of_measurement: min
+
+  bedroom_day_brightness:
+    name: ความสว่างไฟหัวนอน ปกติ
+    min: 1
+    max: 100
+    step: 5
+    initial: 70
+    icon: mdi:brightness-6
+    unit_of_measurement: "%"
+
+  bedroom_night_brightness:
+    name: ความสว่างไฟหัวนอน กลางดึก
+    min: 1
+    max: 100
+    step: 1
+    initial: 8
+    icon: mdi:weather-night
+    unit_of_measurement: "%"
+
+  bedroom_manual_hold_min:
+    name: สั่งมือแล้วหยุดอัตโนมัติกี่นาที
+    min: 5
+    max: 480
+    step: 5
+    initial: 90
+    icon: mdi:hand-back-right
+    unit_of_measurement: min
+
+input_datetime:
+  bedroom_night_start:
+    name: เริ่มโหมดกลางคืน
+    has_date: false
+    has_time: true
+  bedroom_night_end:
+    name: เลิกโหมดกลางคืน
+    has_date: false
+    has_time: true
+
+timer:
+  bedroom_manual_hold:
+    name: หยุดอัตโนมัติชั่วคราว
+    icon: mdi:pause-octagon
+
+# ── ตัวช่วยบอกว่า "ตอนนี้อยู่ในช่วงกลางคืนหรือยัง" ──
+# แยกออกมาเป็น entity เดียว automation ทุกตัวจะได้อ้างที่เดียวกัน
+# และรองรับกรณีช่วงเวลาคร่อมเที่ยงคืน (เช่น 22:00 - 06:00)
+template:
+  - binary_sensor:
+      # ใช้ชื่ออังกฤษเพื่อให้ entity_id ออกมาเป็น binary_sensor.bedroom_night_mode
+      # ถ้าตั้งชื่อไทย HA จะถอดเป็นอักษรโรมันแบบเดาไม่ได้ แล้ว automation จะอ้างไม่ถูก
+      # อยากได้ชื่อไทยบนหน้าจอ ให้ไปเปลี่ยน display name ใน UI ทีหลังได้ ไม่กระทบ id
+      - name: Bedroom Night Mode
+        unique_id: bedroom_night_mode
+        icon: mdi:weather-night
+        state: >
+          {% set s = states('input_datetime.bedroom_night_start') %}
+          {% set e = states('input_datetime.bedroom_night_end') %}
+          {% if s in ['unknown','unavailable'] or e in ['unknown','unavailable'] %}
+            false
+          {% else %}
+            {% set t = now().strftime('%H:%M:%S') %}
+            {% if s > e %}
+              {{ t >= s or t < e }}
+            {% else %}
+              {{ s <= t < e }}
+            {% endif %}
+          {% endif %}

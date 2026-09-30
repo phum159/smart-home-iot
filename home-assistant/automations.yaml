@@ -1,0 +1,169 @@
+# ══════════════════════════════════════════════════════════
+#  ระบบไฟห้องนอน — เอาไปแทนที่ automations.yaml ทั้งไฟล์
+#
+#  บทบาทของไฟแต่ละดวง:
+#    โคมปลายเท้า (relay)  = ไฟหลัก เปิด/ปิดอย่างเดียว หรี่ไม่ได้
+#    ไฟหัวนอน L510        = หรี่ได้ ใช้เป็นไฟอ่านหนังสือและไฟกลางดึก
+# ══════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────
+# 1. เข้าห้องแล้วมืด → เปิดไฟ
+#    กลางวันเปิดทั้งสองดวง กลางดึกเปิดแค่ไฟหัวนอนหรี่ๆ ไม่ให้แสบตา
+# ──────────────────────────────────────────────────────────
+- id: bedroom_presence_on
+  alias: ห้องนอน • มีคนเข้ามา → เปิดไฟ
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.smart_home_control_box_presence
+      from: "off"
+      to: "on"
+  condition:
+    - condition: state
+      entity_id: input_boolean.bedroom_auto
+      state: "on"
+    - condition: state
+      entity_id: timer.bedroom_manual_hold
+      state: idle
+    # เช็คแสงเฉพาะตอนจะ "เปิด" เท่านั้น ไม่เอาแสงมาสั่งปิด
+    # เพราะไฟที่เราเปิดเองจะทำให้ lux สูงขึ้นแล้วสั่งปิดตัวเอง วนไม่จบ
+    - condition: numeric_state
+      entity_id: sensor.smart_home_control_box_box1_illuminance
+      below: input_number.bedroom_lux_on
+  action:
+    - choose:
+        - alias: กลางดึก
+          conditions:
+            - condition: state
+              entity_id: binary_sensor.bedroom_night_mode
+              state: "on"
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id: light.aifhawn_n
+              data:
+                brightness_pct: >
+                  {{ states('input_number.bedroom_night_brightness') | int(8) }}
+            - condition: state
+              entity_id: input_boolean.bedroom_night_footlamp
+              state: "on"
+            - service: switch.turn_on
+              target:
+                entity_id: switch.smart_home_lamp_box_lamp_box_relay
+      default:
+        - service: switch.turn_on
+          target:
+            entity_id: switch.smart_home_lamp_box_lamp_box_relay
+        - service: light.turn_on
+          target:
+            entity_id: light.aifhawn_n
+          data:
+            brightness_pct: >
+              {{ states('input_number.bedroom_day_brightness') | int(70) }}
+
+# ──────────────────────────────────────────────────────────
+# 2. ไม่มีคนตามเวลาที่ตั้งไว้ → ปิดทุกดวง
+# ──────────────────────────────────────────────────────────
+- id: bedroom_presence_off
+  alias: ห้องนอน • ไม่มีคน → ปิดไฟ
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.smart_home_control_box_presence
+      from: "on"
+      to: "off"
+      for:
+        minutes: "{{ states('input_number.bedroom_empty_off_min') | int(5) }}"
+  condition:
+    - condition: state
+      entity_id: input_boolean.bedroom_auto
+      state: "on"
+    - condition: state
+      entity_id: timer.bedroom_manual_hold
+      state: idle
+  action:
+    - service: switch.turn_off
+      target:
+        entity_id: switch.smart_home_lamp_box_lamp_box_relay
+    - service: light.turn_off
+      target:
+        entity_id: light.aifhawn_n
+
+# ──────────────────────────────────────────────────────────
+# 3. นอนนิ่งนานในช่วงกลางคืน → ถือว่าหลับแล้ว ปิดไฟ
+#    ข้อนี้คือของที่เรดาร์ mmWave ทำได้แต่ PIR ทำไม่ได้
+#    เพราะ PIR จะมองว่าคนนอนนิ่ง = ไม่มีคน แล้วปิดไฟใส่หน้าตั้งแต่ยังไม่หลับ
+# ──────────────────────────────────────────────────────────
+- id: bedroom_asleep
+  alias: ห้องนอน • นอนนิ่งนานแล้ว → ปิดไฟ
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: sensor.smart_home_control_box_presence_state
+      to: "static"
+      for:
+        minutes: "{{ states('input_number.bedroom_sleep_min') | int(20) }}"
+  condition:
+    - condition: state
+      entity_id: input_boolean.bedroom_auto
+      state: "on"
+    - condition: state
+      entity_id: binary_sensor.bedroom_night_mode
+      state: "on"
+  action:
+    - service: light.turn_off
+      target:
+        entity_id: light.aifhawn_n
+    - service: switch.turn_off
+      target:
+        entity_id: switch.smart_home_lamp_box_lamp_box_relay
+
+# ──────────────────────────────────────────────────────────
+# 4. สั่งไฟเองจากแอป → หยุดอัตโนมัติชั่วคราว
+#    กันไม่ให้ระบบไปปิดไฟที่เราเพิ่งตั้งใจเปิด
+# ──────────────────────────────────────────────────────────
+- id: bedroom_manual_override
+  alias: ห้องนอน • สั่งเอง → พักระบบอัตโนมัติ
+  mode: restart
+  trigger:
+    - platform: state
+      entity_id:
+        - switch.smart_home_lamp_box_lamp_box_relay
+        - light.aifhawn_n
+  condition:
+    # context.user_id มีค่า = มีคนกดจริง ไม่ใช่ automation สั่ง
+    - condition: template
+      value_template: "{{ trigger.to_state.context.user_id is not none }}"
+  action:
+    - service: timer.start
+      target:
+        entity_id: timer.bedroom_manual_hold
+      data:
+        duration: >
+          {{ (states('input_number.bedroom_manual_hold_min') | int(90) * 60)
+             | timestamp_custom('%H:%M:%S', false) }}
+
+# ──────────────────────────────────────────────────────────
+# 5. ออกจากห้องแล้ว → ยกเลิกการพักระบบทันที
+#    ไม่ต้องรอครบเวลา เพราะออกจากห้องไปแล้วถือว่าจบเรื่อง
+# ──────────────────────────────────────────────────────────
+- id: bedroom_clear_hold
+  alias: ห้องนอน • ออกจากห้อง → เลิกพักระบบ
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.smart_home_control_box_presence
+      from: "on"
+      to: "off"
+      for:
+        minutes: "{{ states('input_number.bedroom_empty_off_min') | int(5) }}"
+  condition:
+    - condition: not
+      conditions:
+        - condition: state
+          entity_id: timer.bedroom_manual_hold
+          state: idle
+  action:
+    - service: timer.cancel
+      target:
+        entity_id: timer.bedroom_manual_hold
